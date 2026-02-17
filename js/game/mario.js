@@ -1,50 +1,62 @@
-// Mario character: state machine, position, animation
+// Mario character: auto-running state machine, position, animation
 import { MARIO_SPRITE } from '../sprites.js';
 import { drawSprite } from '../renderer.js';
 import { MARIO_STATES } from '../config.js';
 
 export class Mario {
     constructor() {
-        this.x = 120;
-        this.y = 330; // ground level
+        this.x = 120;           // screen x (fixed)
+        this.y = 330;           // screen y
         this.baseY = 330;
-        this.state = MARIO_STATES.IDLE;
-        this.frame = 0;
+        this.worldX = 0;        // world position (drives camera)
+        this.runSpeed = 60;     // pixels per second in world space
+        this.state = MARIO_STATES.RUN;
+        this.frame = 1;
         this.frameTimer = 0;
         this.scale = 2;
         this.hitTimer = 0;
         this.celebrateTimer = 0;
-        this.runTimer = 0;
         this.jumpVelocity = 0;
         this.isJumping = false;
         this.visible = true;
         this.blinkTimer = 0;
+        this.bobTime = 0;
+        this.paused = false;    // pause running (for flagpole sequence)
     }
 
     reset() {
-        this.x = 120;
+        this.worldX = 0;
         this.y = this.baseY;
-        this.state = MARIO_STATES.IDLE;
-        this.frame = 0;
+        this.state = MARIO_STATES.RUN;
+        this.frame = 1;
         this.hitTimer = 0;
         this.celebrateTimer = 0;
         this.isJumping = false;
         this.jumpVelocity = 0;
         this.visible = true;
         this.blinkTimer = 0;
+        this.paused = false;
     }
 
     triggerJump() {
         if (!this.isJumping) {
             this.isJumping = true;
-            this.jumpVelocity = -180;
+            this.jumpVelocity = -200;
+            this.state = MARIO_STATES.JUMP;
+        }
+    }
+
+    triggerSmallJump() {
+        if (!this.isJumping) {
+            this.isJumping = true;
+            this.jumpVelocity = -130;
             this.state = MARIO_STATES.JUMP;
         }
     }
 
     triggerHit() {
         this.state = MARIO_STATES.HIT;
-        this.hitTimer = 0.8;
+        this.hitTimer = 0.6;
         this.blinkTimer = 0.8;
     }
 
@@ -54,24 +66,24 @@ export class Mario {
         this.triggerJump();
     }
 
-    triggerRun() {
-        if (this.state !== MARIO_STATES.HIT) {
-            this.state = MARIO_STATES.RUN;
-            this.runTimer = 0.5;
-        }
-    }
-
     update(dt) {
+        this.bobTime += dt;
+
+        // Auto-run: advance world position
+        if (!this.paused && this.state !== MARIO_STATES.HIT) {
+            this.worldX += this.runSpeed * dt;
+        }
+
         // Jump physics
         if (this.isJumping) {
             this.y += this.jumpVelocity * dt;
-            this.jumpVelocity += 500 * dt; // gravity
+            this.jumpVelocity += 550 * dt; // gravity
             if (this.y >= this.baseY) {
                 this.y = this.baseY;
                 this.isJumping = false;
                 this.jumpVelocity = 0;
                 if (this.state === MARIO_STATES.JUMP) {
-                    this.state = MARIO_STATES.IDLE;
+                    this.state = this.paused ? MARIO_STATES.IDLE : MARIO_STATES.RUN;
                 }
             }
         }
@@ -80,7 +92,7 @@ export class Mario {
         if (this.hitTimer > 0) {
             this.hitTimer -= dt;
             if (this.hitTimer <= 0) {
-                this.state = MARIO_STATES.IDLE;
+                this.state = this.paused ? MARIO_STATES.IDLE : MARIO_STATES.RUN;
             }
         }
 
@@ -97,24 +109,20 @@ export class Mario {
         if (this.celebrateTimer > 0) {
             this.celebrateTimer -= dt;
             if (this.celebrateTimer <= 0) {
-                this.state = MARIO_STATES.IDLE;
+                this.state = this.paused ? MARIO_STATES.IDLE : MARIO_STATES.RUN;
             }
         }
 
-        // Run timer
-        if (this.runTimer > 0) {
-            this.runTimer -= dt;
-            if (this.runTimer <= 0 && this.state === MARIO_STATES.RUN) {
-                this.state = MARIO_STATES.IDLE;
-            }
-        }
-
-        // Animation frames
-        this.frameTimer += dt;
-        if (this.frameTimer > 0.12) {
-            this.frameTimer = 0;
-            if (this.state === MARIO_STATES.RUN) {
+        // Run animation frames
+        if (this.state === MARIO_STATES.RUN) {
+            this.frameTimer += dt;
+            if (this.frameTimer > 0.1) {
+                this.frameTimer = 0;
                 this.frame = this.frame === 1 ? 2 : 1;
+            }
+            // Subtle vertical bob while running
+            if (!this.isJumping) {
+                this.y = this.baseY + Math.sin(this.bobTime * 10) * 1.5;
             }
         }
     }

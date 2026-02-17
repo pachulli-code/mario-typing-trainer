@@ -1,4 +1,4 @@
-// MAIN GAMEPLAY SCREEN — core typing game loop
+// MAIN GAMEPLAY SCREEN — side-scrolling runner with typing
 import { VIRTUAL_WIDTH, VIRTUAL_HEIGHT, WORLDS, SCREENS, MAX_LIVES, COINS_PER_LIFE, LEVEL_TIME, WORDS_PER_LEVEL, STAR_THRESHOLDS } from '../config.js';
 import { drawTextOutlined } from '../renderer.js';
 import { getState, setState, resetLevelState } from '../state.js';
@@ -7,15 +7,15 @@ import { drawBackground } from '../backgrounds.js';
 import { Mario } from '../game/mario.js';
 import { Cappy } from '../game/cappy.js';
 import { CoinManager } from '../game/coin.js';
-import { QuestionBlock } from '../game/questionBlock.js';
-import { Obstacle } from '../game/obstacle.js';
+import { EnemyManager } from '../game/enemyManager.js';
+import { Scenery } from '../game/scenery.js';
 import { HUD } from '../game/hud.js';
 import { ParticleSystem } from '../animation.js';
-import { playCoinSound, playErrorSound, playCappySound, playJumpSound } from '../audio.js';
+import { playCoinSound, playErrorSound, playCappySound, playJumpSound, playLevelCompleteSound } from '../audio.js';
 import { wordsRu } from '../data/wordsRu.js';
 import { wordsEn } from '../data/wordsEn.js';
 
-let mario, cappy, coinManager, questionBlock, obstacle, hud, particles;
+let mario, cappy, coinManager, enemyManager, scenery, hud, particles;
 let wordList = [];
 let currentWordIndex = 0;
 let timeLeft = LEVEL_TIME;
@@ -24,35 +24,36 @@ let gameTime = 0;
 let worldIndex = 0;
 let isGameActive = false;
 let countdownTimer = 0;
+let levelLength = 0;
+
+// Flagpole finish sequence
+let finishPhase = 'none'; // 'none', 'runToFlag', 'jumpToFlag', 'slideFlag', 'runToCastle', 'done'
+let finishTimer = 0;
+let flagpoleScreenX = 0;
 
 export function enter() {
     worldIndex = getState().currentWorld;
     resetLevelState();
 
-    mario = new Mario();
-    cappy = new Cappy();
-    coinManager = new CoinManager();
-    questionBlock = new QuestionBlock();
-    obstacle = new Obstacle();
-    hud = new HUD();
-    particles = new ParticleSystem();
-
     // Load words for this level
     const world = WORLDS[worldIndex];
     const lang = getState().lang;
     const wordSource = lang === 'ru' ? wordsRu : wordsEn;
-
-    // Get appropriate difficulty words
-    const difficultyMap = {
-        letters: 'letters',
-        shortWords: 'shortWords',
-        longWords: 'longWords',
-        phrases: 'phrases',
-        sentences: 'sentences'
-    };
-
-    const pool = wordSource[difficultyMap[world.difficulty]] || wordSource.letters;
+    const pool = wordSource[world.difficulty] || wordSource.letters;
     wordList = shuffle([...pool]).slice(0, WORDS_PER_LEVEL);
+
+    // Calculate level length based on word count (wider level for more words)
+    levelLength = 800 + wordList.length * 120;
+
+    mario = new Mario();
+    cappy = new Cappy();
+    coinManager = new CoinManager();
+    enemyManager = new EnemyManager();
+    scenery = new Scenery(worldIndex, levelLength);
+    hud = new HUD();
+    particles = new ParticleSystem();
+
+    enemyManager.setWords(wordList);
 
     currentWordIndex = 0;
     timeLeft = LEVEL_TIME;
@@ -60,14 +61,14 @@ export function enter() {
     cameraX = 0;
     isGameActive = false;
     countdownTimer = 3;
+    finishPhase = 'none';
+    finishTimer = 0;
 
     setState({
         wordsTotal: wordList.length,
         wordsCompleted: 0,
         startTime: Date.now()
     });
-
-    questionBlock.setWord(wordList[0]);
 
     setKeyCallback(handleKey);
 }
@@ -82,11 +83,12 @@ function shuffle(arr) {
 
 function handleKey(key) {
     if (!isGameActive) return;
+    if (finishPhase !== 'none') return;
 
     const state = getState();
     if (state.lives <= 0) return;
 
-    const expectedChar = questionBlock.getCurrentChar();
+    const expectedChar = enemyManager.getCurrentChar();
     if (!expectedChar) return;
 
     const totalChars = state.totalChars + 1;
@@ -97,12 +99,10 @@ function handleKey(key) {
         const streak = state.streak + 1;
         const bestStreak = Math.max(streak, state.bestStreak);
 
-        // Calculate coins: 1 per char, bonus for streak
         let coinsEarned = 1;
         if (streak > 0 && streak % 10 === 0) coinsEarned += 5;
         const coins = state.coins + coinsEarned;
 
-        // Life recovery: every COINS_PER_LIFE coins = +1 life
         let lives = state.lives;
         if (coins >= COINS_PER_LIFE && Math.floor((coins - coinsEarned) / COINS_PER_LIFE) < Math.floor(coins / COINS_PER_LIFE)) {
             lives = Math.min(MAX_LIVES, lives + 1);
@@ -110,48 +110,55 @@ function handleKey(key) {
 
         setState({ correctChars, totalChars, streak, bestStreak, coins, lives });
 
-        // Play coin sound and effects
         playCoinSound();
 
-        // Cappy throw to block
-        playCappySound();
-        cappy.throw(
-            mario.x + 20, mario.y + 5,
-            questionBlock.x, questionBlock.y,
-            () => {
-                coinManager.spawn(questionBlock.x, questionBlock.y - 20);
-                particles.emit(questionBlock.x, questionBlock.y - 20, 5, {
-                    speed: 80, life: 0.5, size: 2,
-                    colors: ['#ffdd00', '#ffaa00', '#ffee66'],
-                    gravity: 100
-                });
-            }
-        );
+        // Cappy throw to active enemy
+        const enemyPos = enemyManager.getActiveEnemyScreenPos(cameraX);
+        if (enemyPos) {
+            playCappySound();
+            cappy.throw(
+                mario.x + 20, mario.y + 5,
+                enemyPos.x, enemyPos.y,
+                () => {
+                    coinManager.spawn(enemyPos.x, enemyPos.y - 20);
+                    particles.emit(enemyPos.x, enemyPos.y - 20, 5, {
+                        speed: 80, life: 0.5, size: 2,
+                        colors: ['#ffdd00', '#ffaa00', '#ffee66'],
+                        gravity: 100
+                    });
+                }
+            );
+        }
 
-        mario.triggerRun();
+        // Mario jumps on correct typing
+        mario.triggerSmallJump();
 
-        // Check if word complete
-        const wordDone = questionBlock.typeChar();
+        const wordDone = enemyManager.typeChar();
         hud.showCombo(streak);
 
         if (wordDone) {
             currentWordIndex++;
-            const wordsCompleted = currentWordIndex;
-            setState({ wordsCompleted });
+            setState({ wordsCompleted: currentWordIndex });
 
-            if (currentWordIndex >= wordList.length) {
-                // LEVEL COMPLETE
-                finishLevel();
-                return;
+            playJumpSound();
+            mario.triggerJump();
+
+            // Coin burst on word complete
+            if (enemyPos) {
+                for (let i = 0; i < 3; i++) {
+                    coinManager.spawn(enemyPos.x + (i - 1) * 15, enemyPos.y - 30);
+                }
+                particles.emit(enemyPos.x, enemyPos.y, 12, {
+                    speed: 120, life: 0.6, size: 3,
+                    colors: ['#ffdd00', '#ffaa00', '#ff4444', '#44ff44'],
+                    gravity: 80
+                });
             }
 
-            // Next word
-            questionBlock.setWord(wordList[currentWordIndex]);
-            mario.triggerJump();
-            playJumpSound();
-
-            // Scroll camera slightly
-            cameraX += 20;
+            // Check if all words done
+            if (currentWordIndex >= wordList.length && enemyManager.allWordsDefeated()) {
+                startFinishSequence();
+            }
         }
 
         updateStats();
@@ -163,15 +170,11 @@ function handleKey(key) {
         setState({ totalChars, streak, lives });
 
         playErrorSound();
-
-        // Screen shake
         setState({ shakeAmount: 6 });
 
-        // Goomba appears
-        obstacle.spawnGoomba(mario.x, mario.y);
+        enemyManager.onError();
         mario.triggerHit();
 
-        // Error particles
         particles.emit(mario.x + 16, mario.y + 10, 8, {
             speed: 60, life: 0.4, size: 3,
             colors: ['#ff0000', '#ff4444', '#ff8888'],
@@ -179,7 +182,6 @@ function handleKey(key) {
         });
 
         if (lives <= 0) {
-            // GAME OVER
             setTimeout(() => {
                 clearKeyCallback();
                 setState({ screen: SCREENS.GAME_OVER });
@@ -198,21 +200,12 @@ function updateStats() {
     setState({ wpm, accuracy });
 }
 
-function finishLevel() {
-    const state = getState();
-    const accuracy = state.accuracy;
-    let stars = 0;
-    if (accuracy >= STAR_THRESHOLDS[0]) stars = 1;
-    if (accuracy >= STAR_THRESHOLDS[1]) stars = 2;
-    if (accuracy >= STAR_THRESHOLDS[2]) stars = 3;
-
-    setState({ stars });
-    mario.triggerCelebrate();
-
-    setTimeout(() => {
-        clearKeyCallback();
-        setState({ screen: SCREENS.LEVEL_COMPLETE });
-    }, 1500);
+function startFinishSequence() {
+    isGameActive = false;
+    finishPhase = 'runToFlag';
+    finishTimer = 0;
+    mario.runSpeed = 120; // speed up for finish
+    playLevelCompleteSound();
 }
 
 export function update(dt) {
@@ -225,6 +218,19 @@ export function update(dt) {
             isGameActive = true;
             setState({ startTime: Date.now() });
         }
+        mario.update(dt); // animate even during countdown
+        return;
+    }
+
+    // Finish sequence
+    if (finishPhase !== 'none') {
+        updateFinishSequence(dt);
+        mario.update(dt);
+        cappy.update(dt);
+        coinManager.update(dt);
+        particles.update(dt);
+        scenery.update(dt);
+        cameraX = mario.worldX - mario.x;
         return;
     }
 
@@ -243,15 +249,122 @@ export function update(dt) {
     mario.update(dt);
     cappy.update(dt);
     coinManager.update(dt);
-    questionBlock.update(dt);
-    obstacle.update(dt);
     hud.update(dt);
     particles.update(dt);
+    scenery.update(dt);
+
+    // Camera follows Mario
+    cameraX = mario.worldX - mario.x;
+
+    // Enemy update - check for collisions
+    const enemyResult = enemyManager.update(dt, cameraX, mario.worldX);
+    if (enemyResult === 'hit') {
+        const state = getState();
+        const lives = state.lives - 1;
+        setState({ lives, streak: 0 });
+        playErrorSound();
+        setState({ shakeAmount: 4 });
+        mario.triggerHit();
+
+        particles.emit(mario.x + 16, mario.y + 10, 6, {
+            speed: 50, life: 0.3, size: 3,
+            colors: ['#ff0000', '#ff4444'],
+            gravity: 80
+        });
+
+        if (lives <= 0) {
+            setTimeout(() => {
+                clearKeyCallback();
+                setState({ screen: SCREENS.GAME_OVER });
+            }, 1000);
+        }
+    }
+
+    // Check if all words complete (enemies might finish between spawns)
+    if (currentWordIndex >= wordList.length && enemyManager.allWordsDefeated() && finishPhase === 'none') {
+        startFinishSequence();
+    }
 
     // Decay screen shake
     const shake = getState().shakeAmount;
     if (shake > 0) {
         setState({ shakeAmount: Math.max(0, shake - dt * 20) });
+    }
+}
+
+function updateFinishSequence(dt) {
+    finishTimer += dt;
+    const flagWorldX = scenery.flagpoleX;
+
+    switch (finishPhase) {
+        case 'runToFlag':
+            // Mario runs toward flagpole
+            if (mario.worldX >= flagWorldX - 20) {
+                mario.paused = true;
+                mario.triggerJump();
+                finishPhase = 'jumpToFlag';
+                finishTimer = 0;
+            }
+            break;
+
+        case 'jumpToFlag':
+            // Waiting for jump to peak
+            if (finishTimer > 0.3) {
+                finishPhase = 'slideFlag';
+                finishTimer = 0;
+                scenery.startFlagSlide();
+                mario.paused = true;
+                // Mario slides down
+                playJumpSound();
+            }
+            break;
+
+        case 'slideFlag':
+            // Mario descends with flag
+            mario.y = Math.min(mario.baseY, mario.y + 100 * dt);
+            if (finishTimer > 1.5) {
+                finishPhase = 'runToCastle';
+                finishTimer = 0;
+                mario.paused = false;
+                mario.runSpeed = 100;
+
+                // Firework particles
+                for (let i = 0; i < 5; i++) {
+                    const fx = mario.x + Math.random() * 200;
+                    const fy = 50 + Math.random() * 100;
+                    particles.emit(fx, fy, 15, {
+                        speed: 100, life: 1, size: 3,
+                        colors: ['#ff4444', '#44ff44', '#4444ff', '#ffdd00', '#ff44ff'],
+                        gravity: 40, vy: -50
+                    });
+                }
+            }
+            break;
+
+        case 'runToCastle':
+            // Mario runs into castle
+            if (mario.worldX >= scenery.castleX + 30) {
+                mario.paused = true;
+                mario.visible = false;
+                finishPhase = 'done';
+                finishTimer = 0;
+
+                // Calculate stars
+                const state = getState();
+                let stars = 0;
+                if (state.accuracy >= STAR_THRESHOLDS[0]) stars = 1;
+                if (state.accuracy >= STAR_THRESHOLDS[1]) stars = 2;
+                if (state.accuracy >= STAR_THRESHOLDS[2]) stars = 3;
+                setState({ stars });
+            }
+            break;
+
+        case 'done':
+            if (finishTimer > 1.5) {
+                clearKeyCallback();
+                setState({ screen: SCREENS.LEVEL_COMPLETE });
+            }
+            break;
     }
 }
 
@@ -269,18 +382,33 @@ export function draw(ctx) {
     // Background (parallax)
     drawBackground(ctx, worldIndex, cameraX, gameTime);
 
-    // Game entities
-    obstacle.draw(ctx);
-    questionBlock.draw(ctx);
+    // Scenery (pipes, bushes, staircase, flagpole, castle)
+    scenery.draw(ctx, cameraX);
+
+    // Enemies
+    enemyManager.draw(ctx, cameraX);
+
+    // Coins
     coinManager.draw(ctx);
+
+    // Cappy
     cappy.draw(ctx);
+
+    // Mario
     mario.draw(ctx);
+
+    // Particles
     particles.draw(ctx);
+
+    // Streak visual effects
+    drawStreakEffects(ctx, state.streak, gameTime);
 
     ctx.restore();
 
     // HUD (not affected by shake)
-    hud.draw(ctx, timeLeft);
+    if (finishPhase === 'none') {
+        hud.draw(ctx, timeLeft);
+    }
 
     // Countdown overlay
     if (countdownTimer > 0) {
@@ -296,11 +424,74 @@ export function draw(ctx) {
             '#ffdd00', '#000', 'center'
         );
 
-        // World name
         const world = WORLDS[worldIndex];
         const lang = state.lang;
         const name = lang === 'ru' ? world.name : world.nameEn;
         drawTextOutlined(name, VIRTUAL_WIDTH / 2, VIRTUAL_HEIGHT / 2 + 40, 20, world.accentColor, '#000', 'center');
+    }
+
+    // Finish sequence text
+    if (finishPhase === 'done') {
+        const lang = state.lang;
+        const text = lang === 'ru' ? 'УРОВЕНЬ ПРОЙДЕН!' : 'LEVEL CLEAR!';
+        const pulse = 1 + Math.sin(gameTime * 4) * 0.1;
+        drawTextOutlined(text, VIRTUAL_WIDTH / 2, VIRTUAL_HEIGHT / 2 - 40,
+            Math.round(32 * pulse), '#ffdd00', '#000', 'center');
+    }
+}
+
+function drawStreakEffects(ctx, streak, time) {
+    if (streak < 5) return;
+
+    // Speed lines behind Mario (streak 5+)
+    ctx.save();
+    ctx.globalAlpha = Math.min(0.6, (streak - 4) * 0.1);
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 1;
+    for (let i = 0; i < Math.min(streak - 3, 8); i++) {
+        const y = mario.y + 5 + i * 4;
+        const len = 20 + i * 8;
+        const x = mario.x - 10 - len + Math.sin(time * 8 + i) * 5;
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(x + len, y);
+        ctx.stroke();
+    }
+    ctx.restore();
+
+    // Gold sparkle trail (streak 10+)
+    if (streak >= 10 && Math.random() < 0.3) {
+        particles.emit(mario.x - 5, mario.y + 20, 1, {
+            speed: 30, life: 0.4, size: 2,
+            colors: ['#ffdd00', '#ffee66', '#ffaa00'],
+            gravity: -20
+        });
+    }
+
+    // Rainbow border (streak 15+)
+    if (streak >= 15) {
+        const hue = (time * 200) % 360;
+        ctx.save();
+        ctx.globalAlpha = 0.3;
+        ctx.strokeStyle = `hsl(${hue}, 100%, 60%)`;
+        ctx.lineWidth = 4;
+        ctx.strokeRect(2, 2, VIRTUAL_WIDTH - 4, VIRTUAL_HEIGHT - 4);
+        ctx.restore();
+    }
+
+    // Aura behind Mario (streak 20+)
+    if (streak >= 20) {
+        ctx.save();
+        const grad = ctx.createRadialGradient(
+            mario.x + 16, mario.y + 16, 5,
+            mario.x + 16, mario.y + 16, 40
+        );
+        const alpha = 0.2 + Math.sin(time * 6) * 0.1;
+        grad.addColorStop(0, `rgba(255,221,0,${alpha})`);
+        grad.addColorStop(1, 'rgba(255,221,0,0)');
+        ctx.fillStyle = grad;
+        ctx.fillRect(mario.x - 30, mario.y - 30, 90, 80);
+        ctx.restore();
     }
 }
 
